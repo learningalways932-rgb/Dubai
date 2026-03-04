@@ -1,0 +1,522 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+from io import BytesIO
+import warnings
+import re
+warnings.filterwarnings('ignore')
+
+# Page configuration
+st.set_page_config(
+    page_title="Middle East Sales Dashboard",
+    page_icon="🏢",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Custom CSS for styling
+st.markdown("""
+<style>
+    .main-title {
+        background-color: #0D47A1;
+        color: white;
+        padding: 15px;
+        border-radius: 10px;
+        text-align: center;
+        font-size: 24px;
+        font-weight: bold;
+        margin-bottom: 20px;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    }
+    
+    .kpi-card {
+        background-color: #0D47A1;
+        color: white;
+        padding: 10px;
+        border-radius: 8px;
+        text-align: center;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        height: 90px;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+    }
+    
+    .kpi-title {
+        font-size: 11px;
+        font-weight: bold;
+        margin-bottom: 5px;
+        color: #E5E7EB;
+    }
+    
+    .kpi-value {
+        font-size: 18px;
+        font-weight: bold;
+        color: white;
+    }
+    
+    .dashboard-card {
+        background-color: white;
+        padding: 8px;
+        border-radius: 8px;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        border: 1px solid #E5E7EB;
+        height: 520px;
+        overflow: auto;
+        margin-top: 5px;
+    }
+    
+    .card-title {
+        background-color: #0D47A1;
+        color: white;
+        padding: 8px;
+        border-radius: 6px;
+        margin-bottom: 8px;
+        font-weight: bold;
+        font-size: 14px;
+        text-align: center;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+    
+    .dataframe { font-size: 10px !important; }
+    th { font-size: 10px !important; font-weight: bold !important; background-color: #f8f9fa !important; padding: 6px !important; }
+    td { font-size: 9px !important; padding: 5px !important; }
+    
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    
+    [data-testid="stSidebar"] { background-color: #f8f9fa; }
+    
+    .report-title {
+        background-color: #1565C0;
+        color: white;
+        padding: 10px;
+        border-radius: 8px;
+        text-align: center;
+        font-size: 16px;
+        font-weight: bold;
+        margin-bottom: 12px;
+    }
+    
+    .block-container { padding-top: 0.5rem; padding-bottom: 0.5rem; }
+    div[data-testid="stVerticalBlock"] > div { margin-top: 0px; }
+    .stColumn { padding: 2px; }
+    
+    .sidebar-title {
+        font-size: 14px;
+        font-weight: bold;
+        color: #0D47A1;
+        margin-bottom: 10px;
+        padding-bottom: 5px;
+        border-bottom: 2px solid #0D47A1;
+    }
+
+    /* Ensure dataframe scroll works */
+    [data-testid="stDataFrame"] > div {
+        overflow: auto !important;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+def load_excel_file(uploaded_file):
+    try:
+        excel_data = pd.read_excel(uploaded_file, sheet_name=None, header=None)
+        
+        required_sheets = ['Category', 'Sub Category', 'Country Channel Category', 
+                          'Disc Coupon', 'Channel', 'Country', 'INV']
+        
+        missing_sheets = [s for s in required_sheets if s not in excel_data]
+        if missing_sheets:
+            st.error(f"Missing required sheets: {', '.join(missing_sheets)}")
+            return None
+        
+        processed_data = {}
+        
+        for sheet_name in required_sheets:
+            if sheet_name == 'INV':
+                processed_data[sheet_name] = excel_data[sheet_name]
+            else:
+                df_raw = excel_data[sheet_name]
+                header_idx = None
+                for idx in range(min(10, len(df_raw))):
+                    row_vals = df_raw.iloc[idx].astype(str).str.lower().tolist()
+                    if any(keyword in str(val).lower() for val in row_vals 
+                           for keyword in ['category', 'sub', 'country', 'channel', 'disc', 'coupon', 
+                                          'qty', 'amount', 'usd', 'total', 'balance']):
+                        header_idx = idx
+                        break
+                
+                if header_idx is not None:
+                    df = pd.read_excel(uploaded_file, sheet_name=sheet_name, header=header_idx)
+                else:
+                    df = pd.read_excel(uploaded_file, sheet_name=sheet_name, header=0)
+                
+                df.columns = [str(col).strip() for col in df.columns]
+                df = df.dropna(how='all')
+                processed_data[sheet_name] = df
+        
+        return processed_data
+        
+    except Exception as e:
+        st.error(f"Error loading Excel file: {str(e)}")
+        return None
+
+def calculate_kpis(excel_data):
+    kpis = {}
+    
+    try:
+        category_df = excel_data.get('Category', pd.DataFrame())
+        if category_df.empty:
+            st.error("Category sheet is empty or not found")
+            return None
+        
+        category_df.columns = [str(col).strip() for col in category_df.columns]
+        
+        qty_col = None
+        for col in category_df.columns:
+            if 'qty' in col.lower() and 'balance' not in col.lower():
+                qty_col = col
+                break
+        if not qty_col:
+            for col in category_df.columns:
+                if 'quantity' in col.lower() or 'sales qty' in col.lower():
+                    qty_col = col
+                    break
+        
+        kpis['Gross Sales Qty'] = pd.to_numeric(category_df[qty_col], errors='coerce').sum() if qty_col else 0
+        
+        amount_col = None
+        for col in category_df.columns:
+            if 'amount' in col.lower() and 'usd' in col.lower():
+                amount_col = col
+                break
+        if not amount_col:
+            for col in category_df.columns:
+                if 'amount' in col.lower() or 'sales' in col.lower():
+                    amount_col = col
+                    break
+        
+        kpis['Gross Amount (USD)'] = pd.to_numeric(category_df[amount_col], errors='coerce').sum() if amount_col else 0
+        
+        inv_sheet = excel_data.get('INV', pd.DataFrame())
+        if not inv_sheet.empty:
+            try:
+                total_balance = inv_sheet.iloc[0, 0]
+                if pd.notna(total_balance):
+                    try:
+                        kpis['Balance Qty'] = float(total_balance)
+                    except:
+                        nums = re.findall(r'\d+\.?\d*', str(total_balance))
+                        kpis['Balance Qty'] = float(nums[0]) if nums else 0
+                else:
+                    kpis['Balance Qty'] = 0
+            except:
+                kpis['Balance Qty'] = 0
+        else:
+            kpis['Balance Qty'] = 0
+        
+        kpis['Sales %'] = (kpis['Gross Sales Qty'] / kpis['Balance Qty']) * 100 if kpis['Balance Qty'] != 0 else 0
+        
+        report_date = "N/A"
+        if not inv_sheet.empty and inv_sheet.shape[0] >= 2:
+            try:
+                date_value = inv_sheet.iloc[1, 0]
+                if isinstance(date_value, pd.Timestamp):
+                    report_date = date_value.strftime('%d-%m-%Y')
+                elif pd.notna(date_value):
+                    date_obj = pd.to_datetime(date_value, errors='coerce')
+                    if not pd.isna(date_obj):
+                        report_date = date_obj.strftime('%d-%m-%Y')
+                    else:
+                        date_str = str(date_value)
+                        for pattern in [r'\d{2}/\d{2}/\d{4}', r'\d{2}-\d{2}-\d{4}', r'\d{4}/\d{2}/\d{2}', r'\d{4}-\d{2}-\d{2}']:
+                            match = re.search(pattern, date_str)
+                            if match:
+                                date_obj = pd.to_datetime(match.group(), errors='coerce')
+                                if not pd.isna(date_obj):
+                                    report_date = date_obj.strftime('%d-%m-%Y')
+                                    break
+            except:
+                pass
+        
+        kpis['Report Date'] = report_date
+        return kpis
+        
+    except Exception as e:
+        st.error(f"Error calculating KPIs: {str(e)}")
+        return None
+
+def display_kpi_card(title, value, is_percentage=False):
+    if is_percentage:
+        formatted_value = f"{value:.2f}%"
+    elif isinstance(value, (int, np.integer)):
+        formatted_value = f"{value:,.0f}"
+    elif isinstance(value, (float, np.floating)):
+        if 'Amount' in title or 'USD' in title:
+            formatted_value = f"${value:,.2f}"
+        else:
+            formatted_value = f"{value:,.0f}"
+    else:
+        formatted_value = str(value)
+    
+    return f"""
+    <div class="kpi-card">
+        <div class="kpi-title">{title}</div>
+        <div class="kpi-value">{formatted_value}</div>
+    </div>
+    """
+
+def extract_numeric_value(value):
+    if pd.isna(value) or value is None:
+        return 0.0
+    if isinstance(value, (int, float, np.number)):
+        return float(value)
+    cleaned = re.sub(r'[^\d\.\-]', '', str(value))
+    try:
+        return float(cleaned) if cleaned else 0.0
+    except:
+        return 0.0
+
+def get_common_numeric_columns(dataframes):
+    all_numeric_cols = []
+    for df_name, df in dataframes.items():
+        if df_name == 'INV':
+            continue
+        numeric_cols = []
+        for col in df.columns:
+            col_lower = str(col).lower()
+            if col_lower in ['category', 'sub category', 'country', 'channel', 'disc coupon', 'coupon', 'disc', 'subcategory']:
+                continue
+            sample_values = df[col].dropna().head(10)
+            if len(sample_values) > 0:
+                try:
+                    pd.to_numeric(sample_values, errors='coerce')
+                    numeric_cols.append(col)
+                except:
+                    pass
+        all_numeric_cols.append(set(numeric_cols))
+    
+    if all_numeric_cols:
+        return sorted(list(set.intersection(*all_numeric_cols)))
+    return []
+
+def apply_sorting_to_dataframe(df, sort_column, sort_order):
+    if df.empty or sort_column not in df.columns:
+        return df
+    df_copy = df.copy()
+    temp_col = '_sort_temp'
+    df_copy[temp_col] = df_copy[sort_column].apply(extract_numeric_value)
+    ascending = (sort_order == "Ascending (Low to High)")
+    df_copy = df_copy.sort_values(temp_col, ascending=ascending, na_position='last')
+    df_copy = df_copy.drop(temp_col, axis=1)
+    return df_copy
+
+def format_dataframe(df, max_rows=None):
+    """Format dataframe for display - no row limit when scroll is enabled"""
+    if df.empty:
+        return df
+    
+    # Only limit rows if max_rows is explicitly set
+    if max_rows is not None:
+        df = df.head(max_rows).copy()
+    else:
+        df = df.copy()
+    
+    for col in df.columns:
+        col_lower = str(col).lower()
+        if col_lower in ['category', 'sub category', 'country', 'channel', 'disc coupon', 'coupon', 'disc', 'subcategory']:
+            continue
+        if 'amount' in col_lower or 'usd' in col_lower or 'sales' in col_lower:
+            df[col] = df[col].apply(lambda x: f"${extract_numeric_value(x):,.2f}")
+        elif 'qty' in col_lower or 'balance' in col_lower or 'quantity' in col_lower:
+            df[col] = df[col].apply(lambda x: f"{extract_numeric_value(x):,.0f}")
+        elif '%' in col_lower or 'percent' in col_lower:
+            df[col] = df[col].apply(lambda x: f"{extract_numeric_value(x):.2f}%")
+    
+    return df
+
+def main():
+    # Initialize session state
+    if 'file_loaded' not in st.session_state:
+        st.session_state.file_loaded = False
+    if 'excel_data' not in st.session_state:
+        st.session_state.excel_data = None
+
+    st.markdown('<div class="main-title">Middle East Daily Sales Analytics Dashboard</div>', unsafe_allow_html=True)
+    
+    # Only show file uploader if no file is loaded yet
+    if not st.session_state.file_loaded:
+        uploaded_file = st.file_uploader(
+            "📤 Upload Middle East Excel File", 
+            type=['xlsx', 'xls'],
+            help="Upload Excel file with required sheets: Category, Sub Category, Country Channel Category, Disc Coupon, Channel, Country, INV",
+            key="file_uploader"
+        )
+        
+        if uploaded_file is not None:
+            excel_data = load_excel_file(uploaded_file)
+            if excel_data:
+                st.session_state.excel_data = excel_data
+                st.session_state.file_loaded = True
+                st.rerun()
+        else:
+            st.info("👆 Please upload an Excel file to begin analysis")
+            with st.expander("📋 Expected Excel File Format"):
+                st.markdown("""
+                Your Excel file should contain the following sheets for **Middle East Daily Sales Report**:
+                
+                **Required Sheets:**
+                1. **Category**: Category-wise sales data with Qty and Amount columns
+                2. **Sub Category**: Sub-category wise sales data with Qty, Amount, and Total Balance columns
+                3. **Country Channel Category**: Detailed data by Country, Channel, and Category
+                4. **Disc Coupon**: Discount coupon-wise sales data
+                5. **Channel**: Channel-wise sales data
+                6. **Country**: Country-wise sales data
+                7. **INV**: Contains Total Balance value in cell **A1** and Report Date in cell **A2**
+                """)
+            return
+    
+    # --- DASHBOARD CONTENT (shown only after file is loaded) ---
+    excel_data = st.session_state.excel_data
+    
+    kpis = calculate_kpis(excel_data)
+    if not kpis:
+        return
+    
+    category_df = excel_data.get('Category', pd.DataFrame())
+    sub_category_df = excel_data.get('Sub Category', pd.DataFrame())
+    country_channel_df = excel_data.get('Country Channel Category', pd.DataFrame())
+    disc_coupon_df = excel_data.get('Disc Coupon', pd.DataFrame())
+    channel_df = excel_data.get('Channel', pd.DataFrame())
+    country_df = excel_data.get('Country', pd.DataFrame())
+    
+    for df in [category_df, sub_category_df, country_channel_df, disc_coupon_df, channel_df, country_df]:
+        df.columns = [str(col).strip() for col in df.columns]
+    
+    dataframes_dict = {
+        'Category': category_df,
+        'Sub Category': sub_category_df,
+        'Country Channel Category': country_channel_df,
+        'Disc Coupon': disc_coupon_df,
+        'Channel': channel_df,
+        'Country': country_df
+    }
+    
+    common_columns = get_common_numeric_columns(dataframes_dict)
+    
+    # SIDEBAR
+    with st.sidebar:
+        st.markdown('<div class="sidebar-title">📊 SORTING CONTROLS</div>', unsafe_allow_html=True)
+        
+        if common_columns:
+            sort_column = st.selectbox("Sort all tables by:", options=common_columns, index=0)
+            sort_order = st.radio(
+                "Sort order:",
+                options=["Descending (High to Low)", "Ascending (Low to High)"],
+                index=0
+            )
+            st.markdown("---")
+            st.info(f"All 6 tables will be sorted by **{sort_column}** in **{sort_order}** order.")
+        else:
+            st.warning("No common numeric columns found for sorting.")
+            sort_column = None
+            sort_order = "Descending (High to Low)"
+        
+        st.markdown("---")
+        st.markdown("### 📋 Table Settings")
+        
+        table_height = st.slider("Table height (px):", min_value=300, max_value=800, value=500,
+                                  help="Height of each table — scroll appears automatically when data exceeds this height")
+        
+        st.markdown("---")
+        if st.button("🔄 Upload New File", use_container_width=True):
+            st.session_state.file_loaded = False
+            st.session_state.excel_data = None
+            st.rerun()
+    
+    # Apply sorting
+    if sort_column and common_columns:
+        category_df_sorted = apply_sorting_to_dataframe(category_df, sort_column, sort_order)
+        sub_category_df_sorted = apply_sorting_to_dataframe(sub_category_df, sort_column, sort_order)
+        country_channel_df_sorted = apply_sorting_to_dataframe(country_channel_df, sort_column, sort_order)
+        disc_coupon_df_sorted = apply_sorting_to_dataframe(disc_coupon_df, sort_column, sort_order)
+        channel_df_sorted = apply_sorting_to_dataframe(channel_df, sort_column, sort_order)
+        country_df_sorted = apply_sorting_to_dataframe(country_df, sort_column, sort_order)
+    else:
+        category_df_sorted = category_df
+        sub_category_df_sorted = sub_category_df
+        country_channel_df_sorted = country_channel_df
+        disc_coupon_df_sorted = disc_coupon_df
+        channel_df_sorted = channel_df
+        country_df_sorted = country_df
+    
+    # Format all data (no row limit — scroll handles overflow)
+    category_display = format_dataframe(category_df_sorted)
+    sub_category_display = format_dataframe(sub_category_df_sorted)
+    country_channel_display = format_dataframe(country_channel_df_sorted)
+    disc_coupon_display = format_dataframe(disc_coupon_df_sorted)
+    channel_display = format_dataframe(channel_df_sorted)
+    country_display = format_dataframe(country_df_sorted)
+    
+    # Report title
+    report_title = f"Middle East Daily Sales Report - {kpis.get('Report Date', 'N/A')}"
+    st.markdown(f'<div class="report-title">{report_title}</div>', unsafe_allow_html=True)
+    
+    # KPI row
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.markdown(display_kpi_card("Gross Sales Qty", kpis['Gross Sales Qty']), unsafe_allow_html=True)
+    with col2:
+        st.markdown(display_kpi_card("Gross Amount (USD)", kpis['Gross Amount (USD)']), unsafe_allow_html=True)
+    with col3:
+        st.markdown(display_kpi_card("Balance Qty", kpis['Balance Qty']), unsafe_allow_html=True)
+    with col4:
+        st.markdown(display_kpi_card("Sales %", kpis['Sales %'], is_percentage=True), unsafe_allow_html=True)
+    
+    st.markdown("<br>", unsafe_allow_html=True)
+    
+    # Row 1: 3 tables
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.markdown('<div class="card-title">Category Qty Amount(USD)</div>', unsafe_allow_html=True)
+        if not category_display.empty:
+            st.dataframe(category_display, height=table_height, use_container_width=True, hide_index=True)
+        else:
+            st.info("No category data available")
+    with col2:
+        st.markdown('<div class="card-title">Sub Category Qty Amount(USD)</div>', unsafe_allow_html=True)
+        if not sub_category_display.empty:
+            st.dataframe(sub_category_display, height=table_height, use_container_width=True, hide_index=True)
+        else:
+            st.info("No sub category data available")
+    with col3:
+        st.markdown('<div class="card-title">Country Channel Category Qty Amount(USD)</div>', unsafe_allow_html=True)
+        if not country_channel_display.empty:
+            st.dataframe(country_channel_display, height=table_height, use_container_width=True, hide_index=True)
+        else:
+            st.info("No country channel category data available")
+    
+    # Row 2: 3 tables
+    col4, col5, col6 = st.columns(3)
+    with col4:
+        st.markdown('<div class="card-title">Disc Coupon Qty Amount (USD)</div>', unsafe_allow_html=True)
+        if not disc_coupon_display.empty:
+            st.dataframe(disc_coupon_display, height=table_height, use_container_width=True, hide_index=True)
+        else:
+            st.info("No discount coupon data available")
+    with col5:
+        st.markdown('<div class="card-title">Channel Qty Amount(USD)</div>', unsafe_allow_html=True)
+        if not channel_display.empty:
+            st.dataframe(channel_display, height=table_height, use_container_width=True, hide_index=True)
+        else:
+            st.info("No channel data available")
+    with col6:
+        st.markdown('<div class="card-title">Country Qty Amount(USD)</div>', unsafe_allow_html=True)
+        if not country_display.empty:
+            st.dataframe(country_display, height=table_height, use_container_width=True, hide_index=True)
+        else:
+            st.info("No country data available")
+
+if __name__ == "__main__":
+    main()
